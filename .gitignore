@@ -1,0 +1,5 @@
+__history/
+.svn/
+*.dcu
+u_common_utils.pas
+u_TDbConnection.pas
