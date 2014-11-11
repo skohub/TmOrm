@@ -19,7 +19,7 @@ type
   TItem = class(TModelBase)
   public
     itemid     : Integer;
-    item_name  : string;
+    name  : string;
     [ReadOnly]
     created_at : Double;
     item_child : TWarehouse;
@@ -58,11 +58,11 @@ var
   Item: TItem;
 begin
   Params := TParameters.Create;
-  Params.AddParameter('orderby', 'item_name');  // сортировка по имени
+  Params.AddParameter('orderby', 'name');  // сортировка по имени
   try
     Items := TItem.Find<TItem>(Params);
     for Item in Items do begin
-      ShowMessage(Format('%d - %s', [Items.itemid, Item.item_name]));
+      ShowMessage(Format('%d - %s', [Items.itemid, Item.name]));
     end;
   finally
     Params.Free;
@@ -82,13 +82,13 @@ var
   Item: TItem;
 begin
   Params := TParameters.Create;
-  Params.AddParameter('orderby', 'item_name');  // сортировка по имени
+  Params.AddParameter('orderby', 'name');  // сортировка по имени
   Eager := TStringList.Create;
   Eager.Add('item_child');
   try
     Items := TItem.Find<TItem>(Params, Eager);
     for Item in Items do begin
-      ShowMessage(Format('%d - %s - %s', [Items.itemid, Item.item_name, Items.item_child.name]));
+      ShowMessage(Format('%d - %s - %s', [Items.itemid, Item.name, Items.item_child.name]));
     end;
   finally
     Params.Free;
@@ -96,4 +96,28 @@ begin
     Items.Free;
   end;
 end;
+```
+
+Возможности записи
+------------------
+
+Редактирование
+```pascal
+Item.name = 'foo';
+Item.Save;
+```
+
+Загрузка заново из БД, вызывается автоматически, если при сохранении произошел Exception.
+```pascal
+Item.reload;
+```
+
+Удаление
+```pascal
+Item.Delete;
+```
+
+Дублирование
+```pascal
+Item.Assign(Item2);
 ```
