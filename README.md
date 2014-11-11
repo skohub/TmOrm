@@ -35,14 +35,14 @@ implementation
 
 { TItem }
 
-class function TWarehouseBobbin.GetPkName: string;
+class function TItem.GetPkName: string;
 begin
-  Result := 'warehouse_bobbinid';
+  Result := 'itemid';
 end;
 
-class function TWarehouseBobbin.GetTableName: string;
+class function TItem.GetTableName: string;
 begin
-  Result := 'warehouse_bobbin';
+  Result := 'item';
 end;
 
 end.
