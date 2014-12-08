@@ -202,6 +202,7 @@ var
   t: TRTTIType;
   f: TRTTIField;
   v: TValue;
+  a: TCustomAttribute;
   m: TRTTIMethod;
 begin
   Context := TRTTIContext.Create;
@@ -209,26 +210,31 @@ begin
   f := t.GetField(GetPkName);
   for f in t.GetDeclaredFields do begin
     v := f.GetValue(Self);
-    case f.FieldType.TypeKind of
-      tkInteger: begin
-        v := -1;
-        f.SetValue(Self, v);
+    a := GetAttribute<DefaultValueAttribute>(f);
+    if Assigned(a) then begin // если есть значение по-умолчанию
+      v.FromVariant(DefaultValueAttribute(a).Value);
+      f.SetValue(Self, v);
+    end else
+      case f.FieldType.TypeKind of
+        tkInteger: begin
+          v := -1;
+          f.SetValue(Self, v);
+        end;
+        tkFloat: begin
+          v := 0;
+          f.SetValue(Self, v);
+        end;
+        tkUString: begin
+          v := '';
+          f.SetValue(Self, v);
+        end;
+        tkClass: begin
+          if v.AsObject <> nil then
+            FreeRelatedModel(v.AsObject);
+          v := nil;
+          f.SetValue(Self, v);
+        end;
       end;
-      tkFloat: begin
-        v := 0;
-        f.SetValue(Self, v);
-      end;
-      tkUString: begin
-        v := '';
-        f.SetValue(Self, v);
-      end;
-      tkClass: begin
-        if v.AsObject <> nil then
-          FreeRelatedModel(v.AsObject);
-        v := nil;
-        f.SetValue(Self, v);
-      end;
-    end;
   end;
 end;
 
@@ -379,6 +385,7 @@ class function TModelBase.FindByPk<T>(Id: Integer): T;
   Params: TParameters;
   Entities: TList<T>;
 begin
+  Result := nil;
   Params := TParameters.Create;
   Params.AddParameter(GetPkName, Id);
   Entities := Find<T>(Params, nil);
@@ -695,7 +702,6 @@ var
   t: TRTTIType;
   f: TRTTIField;
   v: TValue;
-  a: TCustomAttribute;
   Params: TParameters;
 begin
   Context := TRTTIContext.Create;

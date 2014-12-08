@@ -26,6 +26,14 @@ type
   ReadOnlyAttribute = class (TCustomAttribute)
   end;
 
+  DefaultValueAttribute = class (TCustomAttribute)
+  private
+    FValue: Variant;
+  public
+    property Value: Variant read FValue;
+    constructor Create(Value: Variant);
+  end;
+
 implementation
 
 { SelectAttribute }
@@ -40,6 +48,13 @@ end;
 constructor FkNameAttribute.Create(FkName: string);
 begin
   FFkName := FkName;
+end;
+
+{ DefaultValueAttribute }
+
+constructor DefaultValueAttribute.Create(Value: Variant);
+begin
+  FValue := Value;
 end;
 
 end.
