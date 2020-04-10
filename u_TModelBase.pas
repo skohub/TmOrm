@@ -3,149 +3,141 @@ unit u_TModelBase;
 interface
 
 uses
-  u_TParameters, Db, Data.SqlExpr, Data.dbxcommon, Variants, Winapi.Windows,
-  SysUtils, Generics.Collections, u_IModelBase, RTTI, System.TypInfo, Classes;
+  u_TParameters, Db, Variants, Winapi.Windows, SysUtils, Generics.Collections,
+  u_IModelBase, RTTI, System.TypInfo, Classes, u_TDbConnection, u_TPagedList,
+  u_TPaginationParameters, FireDAC.Comp.Client, FireDAC.Stan.Param;
 
 type
   TModelClass = class of TModelBase;
   TModelBase = class(TInterfacedObject, IModelBase)
   private
+    class var
+      FDb: TDbConnection;
+    var
+      FFields: TDictionary<string, string>;
     function GetPkValue: Integer;
     procedure SetPkValue(Value: Integer);
-  public
-    class var Connection: TSqlConnection;
+    procedure LoadFields(Ds: TDataSet);
+    procedure AddQueryParam(Query: TFDQuery; Param: TParameter; Name: string);
 
+    class function GetDb: TDbConnection; static;
+  public
     constructor Create; virtual;
     destructor Destroy; override;
-    class function GetTableName: string; virtual; abstract;
-    class function GetPkName: string; virtual; abstract;
+    class property Db: TDbConnection read GetDb write FDb;
+    class function GetTableName: string; virtual;
+    class function GetPkName: string; virtual;
     // relations
     class function GetSelectFields: string;
     class function GetJoinPart(SecondTableName, SecondPkName: string): string;
 
     class procedure GetRelationVariables(Relations: TList<TObject>; var Select, Join: string);
-    class function  GetRelations(TableNames: TStringList): TList<TObject>;
-    procedure SetRelations(RelationInstances: TList<TObject>);
+    class function GetRelations(TableNames: TStringList): TList<TObject>;
+    procedure SetRelations(Relations: TList<TObject>);
     //
-    class function Find<T:IModelBase, constructor>(Params: TParameters; EagerLoad: TStringList = nil): TList<T>;
+    class function Find<T:IModelBase, constructor>(Params: TParameters = nil; EagerLoad: TStringList = nil): TList<T>; overload;
+    class function Find(Params: TParameters = nil): TList<TModelBase>; overload;
+    class function FindPaged(PaginationParameters: TPaginationParameters;
+      Params: TParameters = nil): TPagedList<TModelBase>;
+    class function ParamsSpecification(Params: TParameters = nil): TFunc<TList<TObject>>;
+    class function PagedSpecification(PaginationParameters: TPaginationParameters;
+      Params: TParameters = nil): TFunc<TList<TModelBase>>;
     class function FindByPk<T:IModelBase, constructor>(Id: Integer): T;
-    procedure LoadFromDs(Ds: TDataSet);
-    procedure Clear;
+    procedure LoadFromDs(Ds: TDataSet); virtual;
+    procedure Clear; virtual;
     procedure Release;
-    procedure Assign(Source: TModelBase);
+    procedure Assign(Source: TModelBase); virtual;
     procedure Delete; virtual;
-    procedure Save; virtual;
+    procedure Validate; virtual;
+    procedure Save(ForceCreate: Boolean); overload; virtual;
+    procedure Save; overload; virtual;
     procedure Reload;
-    function  IsFieldReadOnly(Field: TRTTIField): Boolean;
-    class function  GetAttribute<T: TCustomAttribute>(Field: TRTTIField): TCustomAttribute;
-    property  PkValue: Integer read GetPkValue write SetPkValue;
+    function IsFieldReadOnly(Field: TRTTIField): Boolean;
+    function FieldValue(FieldName: string): string;
+    property PkValue: Integer read GetPkValue write SetPkValue;
+    function ToParameters(): TParameters;
+    function InsertRecord(Params: TParameters; TableName: string): integer; virtual;
+    procedure UpdateRecord(Params: TParameters; TableName, KeyName: string); virtual;
 
-    procedure FreeRelatedModel(Model: TObject); virtual;
-    class function  GetCompareSign(CompareSign: string): string;
-    class function  ProcessSearchProperties(Params: TParameters; TableName: string; var Sql: string): TParams;
-    class function  FindRecords(Params: TParameters; TableName: string; RelationsSelect, RelationsJoin: string): TDataSet; virtual;
-    class function  InsertRecord(Params: TParameters; TableName: string): integer; virtual;
-    class procedure EditRecord(Params: TParameters; TableName, KeyName: string); virtual;
+    class function GetAttribute<T: TCustomAttribute>(Field: TRTTIField): TCustomAttribute;
+    class function GetCompareSign(CompareSign: string): string;
+    class function PrepareSql(Params: TParameters; TableName, Select, Join, Where, GroupBy,
+      OrderBy, Limit: string): string;
+    class function PrepareParams(Params: TParameters): TParams;
+    class function FindRecords(Params: TParameters; TableName: string; RelationsSelect, RelationsJoin: string): TDataSet; virtual;
+    class function CountRecords(Params: TParameters): Integer;
+    class function LastInsertID: integer;
     class procedure DeleteRecord(id: integer; id_column: string; table_name: string); virtual;
-    class function  FindExRecord(Params: TParameters; SQL: string): TDataSet;
-    class function  ExecSQL(SQL: String; Params: Variant): TDataSet;
-    class function  LastInsertID: integer;
     class procedure Log(level: integer; text: string);
-    class function  Select(Sql: String; Params: TParameters): TDataSet;
   end;
 
 implementation
 
-uses u_Attributes, u_TRelation;
+uses u_Attributes, u_TRelation, StrUtils, Math;
 
-
-class function TModelBase.ExecSQL(SQL: String; Params: Variant): TDataSet;
-var
-  Ds: TSqlDataSet;
-  l: Integer;
-  h: Integer;
-  i: Integer;
-begin
-  Ds := TSqlDataSet.Create(nil);
-  Ds.SQLConnection := Connection;
-  Ds.CommandText := SQL;
-  Ds.Params.Clear;
-  if VarIsArray(Params) then begin
-    l := VarArrayLowBound(Params, 1);
-    h := VarArrayHighBound(Params, 1);
-    for i := l to h do
-      Ds.Params.AddParameter.Value := VarArrayGet(Params, [i]);
-  end;
-  Ds.Open;
-  VarClear(Params);
-  Result := Ds;
-end;
-
-class procedure TModelBase.EditRecord(Params: TParameters; TableName, KeyName: string);
+procedure TModelBase.UpdateRecord(Params: TParameters; TableName, KeyName: string);
 var
   Sql, Sep: string;
   i, l: integer;
-  Ds: TSqlDataSet;
+  Ds: TFDQuery;
   Key: TParameter;
+  t: Integer;
 begin
-  Ds := TSqlDataSet.Create(nil);
-  Ds.SQLConnection := Connection;
+  Ds := TFDQuery.Create(nil);
+  Ds.Connection := FDb.Connection;
+  Ds.ResourceOptions.ParamCreate := False;
   Sql := 'UPDATE `' + TableName + '` SET ';
   Key := Params.GetParameter(KeyName);
   if Key.name = '' then
     raise Exception.Create('Не получен обязательный параметр ' + KeyName);
+
   Sep := '';
   l := Params.Length;
   if l = 0 then
     raise Exception.Create('Не передано ни одного параметра для редактирования таблицы ' + TableName + '.');
+
   for i := 0 to l - 1 do begin
     Sql := Sql + Sep + '`' + Params[i].name + '`=?';
     Sep := ',';
   end;
   Sql := Sql + ' WHERE `' + KeyName + '`=?';
-  Ds.CommandText := Sql;
+  Ds.Sql.Text := Sql;
+
   for i := 0 to l - 1 do begin
-    if Params[i].Value = Null then // если NULL
-      with Ds.Params.AddParameter do begin
-        DataType := ftString;
-        Bound := True;
-        Clear;
-      end else
-        Ds.Params.AddParameter.Value := Params[i].Value;
+    AddQueryParam(Ds, Params[i], Format('p%d', [i]));
   end;
-  Ds.Params.AddParameter.AsInteger := Key.Value;
+
+  Ds.Params.Add.AsInteger := Key.Value;
   Ds.ExecSQL;
 end;
 
-class function TModelBase.InsertRecord(Params: TParameters; TableName: string): integer;
+function TModelBase.InsertRecord(Params: TParameters; TableName: string): integer;
 var
   Sql, Sep: string;
   i, l: integer;
-  Ds: TSqlDataSet;
-  Key: TParameter;
+  Ds: TFDQuery;
+  t: Integer;
 begin
   Result := -1;
-  Ds := TSqlDataSet.Create(nil);
-  Ds.SQLConnection := Connection;
+  Ds := TFDQuery.Create(nil);
+  Ds.ResourceOptions.ParamCreate := False;
+  Ds.Connection := FDb.Connection;
   Sql := 'INSERT INTO `' + TableName + '` SET ';
   Sep := '';
   l := Params.Length;
   if l = 0 then
     raise Exception.Create('Не передано ни одного параметра для редактирования таблицы ' + TableName + '.');
+
   for i := 0 to l - 1 do begin
     Sql := Sql + Sep + '`' + Params[i].name + '`=?';
     Sep := ',';
   end;
-  Ds.CommandText := Sql;
+  Ds.Sql.Text := Sql;
+
   for i := 0 to l - 1 do begin
-    if Params[i].Value = Null then // если NULL
-      with Ds.Params.AddParameter do begin
-        DataType := ftString;
-        Bound := True;
-        Clear;
-      end else
-        Ds.Params.AddParameter.Value := Params[i].Value;
+    AddQueryParam(Ds, Params[i], Format('p%d', [i]));
   end;
+
   Ds.ExecSQL;
   Result := LastInsertID;
 end;
@@ -162,6 +154,47 @@ begin
     Result := True;
 end;
 
+procedure TModelBase.AddQueryParam(Query: TFDQuery; Param: TParameter;
+  Name: string);
+var
+  ParameterType: Integer;
+  QueryParam: TFDParam;
+begin
+  QueryParam := Query.Params.Add;
+  QueryParam.ParamType := ptInput;
+
+  if Param.Value = Null then begin // если NULL
+    QueryParam.Bound := True;
+    QueryParam.Clear;
+    Exit;
+  end;
+
+  ParameterType := VarType(Param.Value) and VarTypeMask;
+  case ParameterType of
+    varDouble:
+    begin
+      QueryParam.DataType := ftFloat;
+      QueryParam.Value := Param.Value;
+    end;
+    varInteger,
+    varInt64:
+    begin
+      QueryParam.DataType := ftInteger;
+      QueryParam.Value := Param.Value;
+    end;
+    varBoolean:
+    begin
+      QueryParam.DataType := ftInteger;
+      QueryParam.Value := IfThen(Param.Value = True, 1, 0);
+    end
+    else
+    begin
+      QueryParam.DataType := ftWideString;
+      QueryParam.Value := Param.Value;
+    end;
+  end;
+end;
+
 procedure TModelBase.Assign(Source: TModelBase);
 var
   Context: TRTTIContext;
@@ -174,12 +207,13 @@ begin
   try
     t := Context.GetType(Self.ClassType);
     st := Context.GetType(Source.ClassType);
-    for f in t.GetDeclaredFields do begin
+    for f in t.GetFields do begin
+      if f.Visibility <> mvPublic then Continue;
       sf := st.GetField(f.Name);
       v  := f.GetValue(Self);
       sv := sf.GetValue(Source);
       case f.FieldType.TypeKind of
-        tkInteger, tkFloat, tkUString: begin
+        tkInteger, tkFloat, tkUString, tkEnumeration: begin
           v := sv;
           f.SetValue(Self, v);
         end;
@@ -203,16 +237,15 @@ var
   f: TRTTIField;
   v: TValue;
   a: TCustomAttribute;
-  m: TRTTIMethod;
 begin
   Context := TRTTIContext.Create;
   t := Context.GetType(Self.ClassType);
-  f := t.GetField(GetPkName);
-  for f in t.GetDeclaredFields do begin
+  for f in t.GetFields do begin
+    if f.Visibility <> mvPublic then Continue;
     v := f.GetValue(Self);
     a := GetAttribute<DefaultValueAttribute>(f);
     if Assigned(a) then begin // если есть значение по-умолчанию
-      v.FromVariant(DefaultValueAttribute(a).Value);
+      v := TValue.FromVariant(DefaultValueAttribute(a).Value);
       f.SetValue(Self, v);
     end else
       case f.FieldType.TypeKind of
@@ -229,18 +262,42 @@ begin
           f.SetValue(Self, v);
         end;
         tkClass: begin
-          if v.AsObject <> nil then
-            FreeRelatedModel(v.AsObject);
-          v := nil;
-          f.SetValue(Self, v);
+          if f.Visibility <> mvPrivate then begin
+            if v.AsObject <> nil then
+              v.AsObject.Free;
+          end;
         end;
       end;
   end;
 end;
 
+class function TModelBase.CountRecords(Params: TParameters): Integer;
+var
+  Sql: string;
+  SqlParams: array of Variant;
+  TableName: string;
+begin
+  TableName := GetTableName();
+  Params.Remove('select');
+  Sql := PrepareSql(
+    Params,
+    TableName,
+    'count(*)',
+    Params.GetJoinSql,
+    Params.GetWhereSql(TableName),
+    Params.GetGroupBySql,
+    Params.GetOrderBySql,
+    Params.GetLimitSql
+  );
+
+  SqlParams := Params.ToVarArray();
+  Result := MainDb.ExecSQLScalar(Sql, SqlParams);
+end;
+
 constructor TModelBase.Create;
 begin
   inherited;
+  FFields := TDictionary<string, string>.Create;
   Clear;
 end;
 
@@ -251,22 +308,13 @@ begin
 end;
 
 class procedure TModelBase.DeleteRecord(id: integer; id_column: string; table_name: string);
-var
-  Ds: TSqlDataSet;
 begin
-  Ds := TSqlDataSet.Create(nil);
-  try
-    Ds.SQLConnection := Connection;
-    Ds.CommandText := Format('DELETE FROM %s WHERE %s=?', [table_name, id_column]);
-    Ds.Params.AddParameter.Value := id;
-    Ds.ExecSQL;
-  finally
-    Ds.Free;
-  end;
+  FDb.ExecSQL(Format('DELETE FROM %s WHERE %s=?', [table_name, id_column]), [id]);
 end;
 
 destructor TModelBase.Destroy;
 begin
+  FreeAndNil(FFields);
   Clear;
   inherited;
 end;
@@ -274,109 +322,118 @@ end;
 class function  TModelBase.FindRecords(Params: TParameters; TableName: string; RelationsSelect, RelationsJoin: string): TDataSet;
 var
   Sql: string;
-  Select: string;
-  Join: string;
-  Order: string;
-  Group: string;
-  Limit: string;
-  Where: string;
-  Ds: TSQLDataSet;
+  Select, Join, Group, OrderBy, Limit: string;
+  Ds: TFDQuery;
   SqlParams: TParams;
   p: TParameter;
 begin
-  Ds := TSQLDataSet.Create(nil);
-  Ds.ParamCheck := False;
-  Ds.GetMetadata := False;
-  Ds.SQLConnection := Connection;
-  p := Params.GetParameter('groupby');
-  if p.Name <> '' then
-    Group := 'GROUP BY ' + p.Value;
-  p := Params.GetParameter('orderby');
-  if p.Name <> '' then
-    Order := 'ORDER BY ' + p.Value;
-  p := Params.GetParameter('limit');
-  if p.Name <> '' then
-    Limit := 'LIMIT ' + p.Value;
-  if Group = '' then // если исползуется group by, то надо указывать каждое поле в параметре select
-    Select := GetSelectFields;
-  p := Params.GetParameter('select');
-  if p.Name <> '' then begin
+  Ds := TFDQuery.Create(nil);
+  Ds.Connection := Db.Connection;
+
+  Group := Params.GetGroupBySql;
+  Select := Params.GetSelectSql;
+  if Group = '' then
+  begin
     if Select <> '' then
       Select := Select + ',';
-    Select := Select + p.Value
-  end;
+    Select := Select + GetSelectFields
+  end
+  else
+    Assert(Select<>'', 'если исползуется group by, то надо указывать каждое поле в параметре select');
   if (Group = '') and (RelationsSelect <> '') then
     Select := Select + ',' + RelationsSelect;
 
-  Join := RelationsJoin;
-  p := Params.GetParameter('join');
-  if p.Name <> '' then
-    Join := Join + p.Value;
+  Join := Format('%s %s', [Params.GetJoinSql, RelationsJoin]);
+  OrderBy := Params.GetOrderBySql;
+  Limit := Params.GetLimitSql;
 
-  p := Params.GetParameter('where');
-  if p.Name <> '' then
-    Where := 'WHERE ' + p.Value;
-  SqlParams := ProcessSearchProperties(Params, TableName, Sql);
-  if Sql <> '' then
-    if Where = '' then
-      Where := Format('WHERE %s', [Sql])
-    else
-      Where := Format('%s AND %s', [Where, Sql]);
-  Ds.CommandText := Format('SELECT %s FROM `%s` %s %s %s %s %s',
-    [Select, TableName, Join, Where, Group, Order,
-    Limit]);
+  Ds.SQL.Text := PrepareSql(
+    Params,
+    TableName,
+    Select,
+    IfThen(Join.IsEmpty, RelationsJoin, Join),
+    Params.GetWhereSql(TableName),
+    Group,
+    OrderBy,
+    Limit
+  );
+
+  SqlParams := PrepareParams(Params);
   try
     Ds.Params.Assign(SqlParams);
+  finally
     SqlParams.Free;
-    Ds.Open;
-    Result := Ds;
-  except
-    Result := nil;
-    Ds.Free;
-    raise;
   end;
+  Ds.Open;
+  Result := Ds;
 end;
 
-procedure TModelBase.FreeRelatedModel(Model: TObject);
+function TModelBase.FieldValue(FieldName: string): string;
 begin
-  Model.Free;
+  if not FFields.TryGetValue(FieldName, Result) then
+    Result := '';
+end;
+
+class function TModelBase.Find(Params: TParameters): TList<TModelBase>;
+var
+  Ds: TDataSet;
+  Value: TModelBase;
+begin
+  Result := TList<TModelBase>.Create;
+  if Params = nil then
+    Params := TParameters.Create;
+  Ds := FindRecords(Params, GetTableName, '', '');
+  try
+    while not Ds.Eof do begin
+      Value := Self.Create;
+      Value.LoadFromDs(Ds);
+      Result.Add(Value);
+      Ds.Next;
+    end;
+  finally
+    Ds.Free;
+  end;
 end;
 
 class function TModelBase.Find<T>(Params: TParameters; EagerLoad: TStringList): TList<T>;
 var
   Ds: TDataSet;
   Value: T;
-  i, Len: Integer;
   Relations: TList<TObject>;
-  Relation: TObject;
+  r: TObject;
+  s1, j1: string;
   RelationInstance: TModelBase;
   RelationInstances: TList<TObject>;
-  s1, j1: string;
 begin
-  RelationInstances := nil;
   Result := TList<T>.Create;
-  Relations := GetRelations(EagerLoad);
-  RelationInstances := TList<TObject>.Create;
-  GetRelationVariables(Relations, s1, j1);
+  try
+    Relations := GetRelations(EagerLoad);
+    GetRelationVariables(Relations, s1, j1);
+  finally
+    for r in Relations do
+      r.Free;
+    FreeAndNil(Relations);
+  end;
+  if Params = nil then
+    Params := TParameters.Create;
   Ds := FindRecords(Params, GetTableName, s1, j1);
   try
     while not Ds.Eof do begin
-      for Relation in Relations do begin
-        RelationInstance := TModelBase(TRelation(Relation).Model.ClassType.Create);
-        RelationInstance.LoadFromDs(Ds);
-        RelationInstances.Add(RelationInstance);
+      Relations := GetRelations(EagerLoad);
+      try
+        Value := T.Create;
+        Value.LoadFromDs(Ds);
+        for r in Relations do
+          TRelation(r).Model.LoadFromDs(Ds);
+        Value.SetRelations(Relations);
+      finally
+        FreeAndNil(Relations);
       end;
-      Value := T.Create;
-      Value.LoadFromDs(Ds);
-      Value.SetRelations(RelationInstances);
-      RelationInstances.Clear;
       Result.Add(Value);
       Ds.Next;
     end;
   finally
     Ds.Free;
-    Relations.Free;
-    RelationInstances.Free;
   end;
 end;
 
@@ -397,43 +454,55 @@ begin
   end;
 end;
 
-class function  TModelBase.FindExRecord(Params: TParameters; SQL: string): TDataSet;
-var where: string;
-    _and: string;
-    ds: TSqlDataSet;
-    len: integer;
-    i: integer;
+class function TModelBase.PagedSpecification(PaginationParameters: TPaginationParameters;
+  Params: TParameters): TFunc<TList<TModelBase>>;
 begin
-  ds := TSqlDataSet.Create(nil);
-  try
-    ds.ParamCheck := False;
-    ds.SqlConnection := Connection;
-    len := params.Length;
-    if len > 0 then where := 'WHERE';
-    for i := 0 to len-1 do begin
-      where := Format(
-                 '%s %s %s %s ?',
-                 [where,
-                 _and,
-                 params[i].name,
-                 GetCompareSign(params[i].CompareSign)]
-               );
-      _and := 'AND';
+  Result :=
+    function: TList<TModelBase>
+    begin
+      Result := Self.FindPaged(PaginationParameters, Params);
     end;
-    ds.CommandText := Format(SQL, [where]);
-    for i := 0 to len-1 do
-      ds.Params.AddParameter.Value := params[i].value;
-    ds.Open;
-    Result := ds;
-  except
-    ds.Free;
+end;
+
+class function TModelBase.ParamsSpecification(Params: TParameters): TFunc<TList<TObject>>;
+begin
+  Result :=
+    function: TList<TObject>
+    begin
+      Result := TList<TObject>(Self.Find(Params));
+    end;
+end;
+
+class function TModelBase.FindPaged(PaginationParameters: TPaginationParameters;
+    Params: TParameters = nil): TPagedList<TModelBase>;
+var
+  ParamsClone: TParameters;
+  TotalCount: Integer;
+  List: TList<TModelBase>;
+begin
+  ParamsClone := TParameters.Create;
+  try
+    ParamsClone.AddRange(Params);
+    TotalCount := CountRecords(ParamsClone);
+  finally
+    ParamsClone.Free;
   end;
+
+  if TotalCount = 0 then
+  begin
+    List := nil
+  end else begin
+    Params.Offset := PaginationParameters.PageSize * (PaginationParameters.Page - 1);
+    Params.Limit := PaginationParameters.PageSize;
+    List := Find(Params);
+  end;
+
+  Result := TPagedList<TModelBase>.CreatePagedList(List, TotalCount,
+    PaginationParameters.Page, PaginationParameters.PageSize);
 end;
 
 class procedure TModelBase.GetRelationVariables(Relations: TList<TObject>; var Select, Join: string);
 var
-  Len: Integer;
-  i: Integer;
   Relation: TObject;
   Sep: string;
 begin
@@ -463,12 +532,24 @@ begin
     raise Exception.Create('Unknown compare sign');
 end;
 
+class function TModelBase.GetDb: TDbConnection;
+begin
+  if not Assigned(FDb) then
+    FDb := u_TDbConnection.MainDb;
+  Result := FDb;
+end;
+
 class function TModelBase.GetJoinPart(SecondTableName, SecondPkName: string): string;
 begin
   Result := Format(
     'LEFT JOIN `%s` ON `%s`.`%s`=`%s`.`%s` ',
     [GetTableName, GetTableName, GetPkName, SecondTableName, SecondPkName]
   );
+end;
+
+class function TModelBase.GetPkName: string;
+begin
+  Result := GetTableName + 'id';
 end;
 
 function TModelBase.GetPkValue: Integer;
@@ -493,18 +574,19 @@ end;
 class function TModelBase.GetRelations(TableNames: TStringList): TList<TObject>;
 var
   c: TRTTIContext;
-  t: TRTTIType;
+  t, t1: TRTTIType;
   f: TRTTIField;
   a: TCustomAttribute;
   FkName: string;
   r: TRelation;
+  v: TValue;
 begin
   c := TRTTIContext.Create;
   try
     Result := TList<TObject>.Create;
     t := c.GetType(Self);
-    f := t.GetField(GetPkName);
-    for f in t.GetDeclaredFields do begin
+    for f in t.GetFields do begin
+      if f.Visibility <> mvPublic then Continue;
       FkName := '';
       a := GetAttribute<FkNameAttribute>(f);
       if Assigned(a) then
@@ -512,7 +594,9 @@ begin
       if f.FieldType.TypeKind = tkClass then
         if Assigned(TableNames) and (TableNames.IndexOf(f.Name) > -1) then begin
           r := TRelation.Create;
-          r.Model := TModelBase(f.FieldType.AsInstance.MetaclassType.Create);
+          t1 := c.GetType(f.FieldType.AsInstance.MetaclassType);
+          v := t1.GetMethod('Create').Invoke(t1.AsInstance.MetaclassType,[]);
+          r.Model := TModelBase(v.AsObject);
           if FkName = '' then
             FkName := TModelBase(r.Model).GetPkName;
           r.FkName := FkName;
@@ -529,38 +613,53 @@ var
   Context: TRTTIContext;
   t: TRTTIType;
   f: TRTTIField;
-  v: TValue;
   a: TCustomAttribute;
   FieldSql: string;
+  FieldName: string;
   Sep: string;
-  SkipField: Boolean;
 begin
   Sep := '';
   Result := '';
   Context := TRTTIContext.Create;
   t := Context.GetType(Self);
-  f := t.GetField(GetPkName);
-  for f in t.GetDeclaredFields do begin
+  for f in t.GetFields do begin
     FieldSql := '';
-    SkipField := False;
-    if f.Visibility = mvPrivate then
-      SkipField := True
-    else
-      for a in f.GetAttributes do begin
-        if a is SelectAttribute then
-          if SelectAttribute(a).Sql <> '' then
-            FieldSql := SelectAttribute(a).Sql
-          else
-            SkipField := True;
+    FieldName := '';
+    // предусловия
+    if f.Visibility <> mvPublic then Continue;
+    if f.FieldType.TypeKind = tkClass then Continue;
+    // поиск атрибута DbField
+    a := GetAttribute<DbFieldAttribute>(f);
+    if a <> nil then FieldName := DbFieldAttribute(a).Name;
+    // поиск атрибута Select
+    a := GetAttribute<SelectAttribute>(f);
+    if a <> nil then begin
+      if SelectAttribute(a).Sql = '' then Continue;
+      FieldSql := SelectAttribute(a).Sql
     end;
-    if not SkipField and (f.FieldType.TypeKind <> tkClass) then begin
-      if FieldSql = '' then
-        FieldSql := Format('`%s`.`%s`', [GetTableName, f.Name]);
-      Result := Format('%s%s %s AS %s_%s',
-        [Result, Sep, FieldSql, GetTableName, f.Name]);
-      Sep := ',';
-    end;
+
+    if FieldSql.IsEmpty then FieldSql := FieldName;
+    if FieldName.IsEmpty then FieldName := f.Name;
+    if FieldSql.IsEmpty then
+      FieldSql := Format('`%s`.`%s`', [GetTableName, f.Name]);
+    Result := Format('%s%s %s AS %s_%s',
+      [Result, Sep, FieldSql, GetTableName, FieldName]);
+    Sep := ',';
   end;
+end;
+
+class function TModelBase.GetTableName: string;
+var
+  l: Integer;
+  r: string;
+begin
+  r := Lowercase(Self.ClassName);
+  l := Length(r);
+  if l > 1 then begin
+    if r[1] = 't' then
+      r := Copy(r, 2, l - 1);
+  end;
+  Result := r;
 end;
 
 class function TModelBase.GetAttribute<T>(Field: TRTTIField): TCustomAttribute;
@@ -575,18 +674,19 @@ end;
 
 class function  TModelBase.LastInsertID: integer;
 var
-  Ds: TSqlDataSet;
+  Ds: TDataSet;
 begin
-  Result := -1;
-  Ds := TSqlDataSet.Create(nil);
-  try
-    Ds.SQLConnection := Connection;
-    Ds.CommandText := 'SELECT LAST_INSERT_ID()';
-    Ds.Open;
-    Result := ds.Fields[0].AsInteger;
-  finally
-    Ds.Free;
-  end;
+  Ds := Db.SelectSQL('SELECT LAST_INSERT_ID()');
+  Result := Ds.Fields[0].AsInteger;
+  Ds.Free;
+end;
+
+procedure TModelBase.LoadFields(Ds: TDataSet);
+var
+  I: Integer;
+begin
+  for I := 0 to Ds.FieldCount - 1 do
+    FFields.AddOrSetValue(Ds.Fields[I].FieldName, Ds.Fields[I].AsString);
 end;
 
 procedure TModelBase.LoadFromDs(Ds: TDataSet);
@@ -596,37 +696,50 @@ var
   f: TRTTIField;
   v: TValue;
   a: TCustomAttribute;
+  DbFieldName: string;
   FieldName: string;
   DsField: TField;
 begin
+  LoadFields(Ds);
   Context := TRTTIContext.Create;
   try
     t := Context.GetType(Self.ClassType);
-    f := t.GetField(GetPkName);
-    for f in t.GetDeclaredFields do begin
+    for f in t.GetFields do begin
+      if f.Visibility <> mvPublic then Continue;
+
       v := f.GetValue(Self);
-      FieldName := Format('%s_%s', [GetTableName, f.Name]);
+      a := GetAttribute<DbFieldAttribute>(f);
+      if a <> nil then
+        DbFieldName := DbFieldAttribute(a).Name
+      else
+        DbFieldName := f.Name;
+      FieldName := Format('%s_%s', [GetTableName, DbFieldName]);
       DsField := Ds.FindField(FieldName);
       if not Assigned(DsField) then
         DsField := Ds.FindField(f.Name);
       if Assigned(DsField) then
         if DsField.IsNull then begin
           case f.FieldType.TypeKind of
-            tkInteger: v := -1;
-            tkFloat  : v := 0;
-            tkUString: v := '';
+            tkInteger    : v := -1;
+            tkFloat      : v := 0;
+            tkUString    : v := '';
+            tkEnumeration: v := False;
           end;
-        end else
+        end else begin
           case f.FieldType.TypeKind of
-            tkInteger: v := DsField.AsInteger;
-            tkFloat  : v := DsField.AsFloat;
+            tkInteger    : v := DsField.AsInteger;
+            tkFloat      : v := DsField.AsFloat;
+            tkEnumeration: v := DsField.AsInteger = 1;
             tkUString: begin
               v := DsField.AsString;
               for a in f.GetAttributes do
                 if a is UTF8Attribute then
-                  v := TEncoding.UTF8.GetString(DsField.AsBytes);
+                  v := DsField.AsString;
             end;
           end;
+          // remove from unmapped fields
+          FFields.Remove(FieldName);
+        end;
       f.SetValue(Self, v);
     end;
   finally
@@ -636,33 +749,34 @@ end;
 
 class procedure TModelBase.Log(level: integer; text: string);
 begin
-  ExecSQL('INSERT INTO log SET message=?', text);
+  Db.ExecSQL('INSERT INTO `log` SET `message`=?', [text]);
 end;
 
-class function TModelBase.ProcessSearchProperties(Params: TParameters; TableName: string; var Sql: string): TParams;
+class function TModelBase.PrepareParams(Params: TParameters): TParams;
 var
-  Len, n: integer;
-  Field: string;
+  Len: integer;
   i: Integer;
-  p: TParams;
 begin
-  p := TParams.Create(nil);
+  Result := TParams.Create(nil);
   Len := Params.Length;
   for i := 0 to Len-1 do begin
-    if Sql <> '' then
-      Sql := Sql + ' AND ';
-    if Pos('.', Params[i].Name) = 0 then
-      Field := TableName + '.' + Params[i].Name
-    else
-      Field := Params[i].Name;
-    if lowercase(Params[i].Value) = 'null' then
-      Sql := Sql + Field + ' IS NULL '
-    else begin
-      Sql := Format('%s %s %s ? ', [Sql, Field, Params[i].CompareSign]);
-      p.AddParameter.AsString := Params[i].Value
-    end;
+    if not Params[i].IsNull then
+      Result.AddParameter.AsString := Params[i].Value
   end;
-  Result := p;
+end;
+
+class function TModelBase.PrepareSql(Params: TParameters; TableName, Select, Join, Where, GroupBy, OrderBy,
+  Limit: string): string;
+begin
+  Result := Format('SELECT %s FROM `%s` %s %s %s %s %s', [
+    Select,
+    TableName,
+    Join,
+    Where,
+    GroupBy,
+    OrderBy,
+    Limit
+  ]);
 end;
 
 procedure TModelBase.Release;
@@ -680,12 +794,14 @@ begin
   cl := TModelClass(Self.ClassType);
   m := cl.Create;
   Params := TParameters.Create;
-  Ds := TDataSet.Create(nil);
+  Ds := nil;
   try
     Params.AddParameter(GetPkName, PkValue);
     Ds := FindRecords(Params, GetTableName, '', '');
-    m.LoadFromDs(Ds);
-    Assign(m);
+    if not Ds.Eof then begin
+      m.LoadFromDs(Ds);
+      Assign(m);
+    end;
   finally
     m.Free;
     Params.Free;
@@ -696,47 +812,27 @@ begin
 //  v.Release;
 end;
 
-procedure TModelBase.Save;
+procedure TModelBase.Save(ForceCreate: Boolean);
 var
-  Context: TRTTIContext;
-  t: TRTTIType;
-  f: TRTTIField;
-  v: TValue;
   Params: TParameters;
 begin
-  Context := TRTTIContext.Create;
-  Params  := TParameters.Create;
+  Validate;
+  Params := ToParameters();
   try
-    t := Context.GetType(Self.ClassType);
-    f := t.GetField(GetPkName);
-    for f in t.GetDeclaredFields do begin
-      if not IsFieldReadOnly(f) and (f.Name <> GetPkName) then begin
-        case f.FieldType.TypeKind of
-          tkInteger:begin
-            v := f.GetValue(Self);
-            if v.AsInteger = -1 then
-              Params.AddParameter(f.Name, Null)
-            else
-              Params.AddParameter(f.Name, v.AsVariant);
-          end;
-          tkFloat, tkUString:begin
-            v := f.GetValue(Self);
-            if CompareText(f.FieldType.Name, 'TDateTime') = 0 then // дата сохраняется текстом
-              Params.AddParameter(f.Name, FormatDateTime('yyyy-mm-dd hh:mm:ss', v.AsExtended))
-            else
-            Params.AddParameter(f.Name, v.AsVariant);
-          end;
-        end;
-      end;
-    end;
     if Params.Length > 0 then begin // если есть что сохранять
       try
-        if PkValue > -1 then begin
+        if not ForceCreate and (PkValue > -1) then begin
           Params.AddParameter(GetPkName, PkValue);
-          EditRecord(Params, GetTableName, GetPkName)
+          UpdateRecord(Params, GetTableName, GetPkName)
         end else begin
-          PkValue := InsertRecord(Params, GetTableName);
-          Reload;
+          if ForceCreate then
+          begin
+            Params.AddParameter(GetPkName, PkValue);
+            InsertRecord(Params, GetTableName)
+          end
+          else
+            PkValue := InsertRecord(Params, GetTableName);
+          Reload();
         end;
       except
         Reload;
@@ -744,27 +840,13 @@ begin
       end;
     end;
   finally
-    Context.Free;
+    Params.Free;
   end;
 end;
 
-class function TModelBase.Select(Sql: String; Params: TParameters): TDataSet;
-var
-  Ds: TSqlDataSet;
-  i: Integer;
+procedure TModelBase.Save;
 begin
-  Ds := TSqlDataSet.Create(nil);
-  try
-    Ds.SQLConnection := TModelBase.Connection;
-    Ds.CommandText := Sql;
-    for i := 0 to Params.Length - 1 do
-      Ds.Params.AddParameter.Value := Params[i].Value;
-    Ds.Open;
-    Result := Ds;
-  except
-    Ds.Free;
-    raise;
-  end;
+  Save(False);
 end;
 
 procedure TModelBase.SetPkValue(Value: Integer);
@@ -783,23 +865,27 @@ begin
   RTTIField.SetValue(Self, RTTIValue);
 end;
 
-procedure TModelBase.SetRelations(RelationInstances: TList<TObject>);
+procedure TModelBase.SetRelations(Relations: TList<TObject>);
 var
   c: TRTTIContext;
   t: TRTTIType;
   f: TRTTIField;
   v: TValue;
   r: TObject;
+  Model: TModelBase;
 begin
   c := TRTTIContext.Create;
   try
     t := c.GetType(Self.ClassType);
-    for f in t.GetDeclaredFields do begin
+    for f in t.GetFields do begin
+      if f.Visibility <> mvPublic then Continue;
+
       if f.FieldType.TypeKind = tkClass then
-        for r in RelationInstances do begin
-          if f.Name = TModelBase(r).GetTableName then begin
+        for r in Relations do begin
+          Model := TRelation(r).Model;
+          if Lowercase(f.Name) = Lowercase(Model.GetTableName) then begin
             v := f.GetValue(Self);
-            v := TModelBase(r);
+            v := Model;
             f.SetValue(Self, v);
           end;
         end;
@@ -809,4 +895,72 @@ begin
   end;
 end;
 
+function TModelBase.ToParameters: TParameters;
+var
+  Context: TRTTIContext;
+  t: TRTTIType;
+  f: TRTTIField;
+  v: TValue;
+  Def: DefaultValueAttribute;
+  FieldName: string;
+  a: TCustomAttribute;
+begin
+  Result  := TParameters.Create;
+  Context := TRTTIContext.Create;
+  try
+    t := Context.GetType(Self.ClassType);
+    for f in t.GetFields do begin
+      if f.Visibility <> mvPublic then Continue;
+      if not IsFieldReadOnly(f) and (f.Name <> GetPkName) then begin
+        a := GetAttribute<DbFieldAttribute>(f);
+        if a <> nil then
+          FieldName := DbFieldAttribute(a).Name
+        else
+          FieldName := f.Name;
+        v := f.GetValue(Self);
+
+        case f.FieldType.TypeKind of
+          tkInteger:begin
+            if v.AsInteger = -1 then
+              Result.AddParameter(FieldName, Null)
+            else
+              Result.AddParameter(FieldName, v.AsVariant);
+          end;
+          tkFloat:begin
+            if CompareText(f.FieldType.Name, 'TDateTime') = 0 then begin// дата сохраняется текстом
+              if v.AsExtended > 0 then
+                Result.AddParameter(FieldName, FormatDateTime('yyyy-mm-dd hh:mm:ss', v.AsExtended))
+              else
+                Result.AddParameter(FieldName, Null);
+            end else
+              Result.AddParameter(FieldName, v.AsVariant);
+          end;
+          tkUString:
+          begin
+            if v.AsString = ''  then begin
+              Def := DefaultValueAttribute(GetAttribute<DefaultValueAttribute>(f));
+              if Assigned(Def) then
+              begin
+                Result.AddParameter(FieldName, Def.Value);
+                Break;
+              end;
+            end;
+            Result.AddParameter(FieldName, v.AsVariant);
+          end;
+          tkEnumeration:
+            Result.AddParameter(FieldName, v.AsVariant);
+        end;
+      end;
+    end;
+  finally
+    Context.Free;
+  end;
+end;
+
+procedure TModelBase.Validate;
+begin
+
+end;
+
 end.
+

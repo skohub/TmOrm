@@ -10,7 +10,7 @@ type
   public
     Model: TModelBase;
     FkName: string;
-    constructor Create;
+
     destructor Destroy; override;
   end;
 
@@ -18,12 +18,11 @@ implementation
 
 { TRelation }
 
-constructor TRelation.Create;
-begin
-end;
+{ TRelation }
 
 destructor TRelation.Destroy;
 begin
+  Model.Free;
   inherited;
 end;
 

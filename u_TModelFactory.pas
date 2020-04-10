@@ -14,9 +14,6 @@ implementation
 
 { TModelFactory }
 
-
-uses u_TProduct;
-
 class function TModelFactory.CreateModel(Name: string): TModelBase;
 begin
 

@@ -7,8 +7,9 @@ uses
 
 type
   IModelBase = interface
+    procedure Delete;
     procedure LoadFromDs(Ds: TDataSet);
-    procedure SetRelations(RelationInstances: TList<TObject>);
+    procedure SetRelations(Relations: TList<TObject>);
     procedure Clear;
     procedure Release;
   end;
