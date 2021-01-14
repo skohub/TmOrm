@@ -43,7 +43,7 @@ begin
   try
     LType := LContext.GetType(RecieverType);
     for LField in LType.GetFields do begin
-      if LFielD.Visibility <> mvPublic then Continue;
+      if LField.Visibility <> mvPublic then Continue;
 
       LDsField := Ds.FindField(LField.Name);
       if Assigned(LDsField) then
@@ -53,13 +53,21 @@ begin
             tkInteger     : LValue := IfThen(FieldIsId(LField.Name), -1, 0);
             tkFloat       : LValue := 0;
             tkUString     : LValue := '';
-            tkEnumeration : LValue := False;
+            tkEnumeration :
+              if LField.FieldType.ClassName = 'TRttiEnumerationType' then
+                TValue.Make(0, LField.FieldType.Handle, LValue)
+              else
+                LValue := False;
           end;
         end else begin
           case LField.FieldType.TypeKind of
             tkInteger     : LValue := LDsField.AsInteger;
             tkFloat       : LValue := LDsField.AsFloat;
-            tkEnumeration : LValue := LDsField.AsInteger = 1;
+            tkEnumeration :
+              if LField.FieldType.ClassName = 'TRttiEnumerationType' then
+                TValue.Make(LDsField.AsInteger, LField.FieldType.Handle, LValue)
+              else
+                LValue := LDsField.AsInteger = 1;
             tkUString     : LValue := LDsField.AsString;
           end;
         end;
